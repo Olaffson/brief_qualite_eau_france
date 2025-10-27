@@ -32,4 +32,4 @@ jobs:
 
       - name: Run ingest script
         working-directory: ingest_azure
-        run: python ingest_data.py
+        run: python 01_ingest_data.py
