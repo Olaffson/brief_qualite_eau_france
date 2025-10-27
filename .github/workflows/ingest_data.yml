@@ -38,3 +38,8 @@ jobs:
         working-directory: ingest_azure
         run: python 02_ingest_data.py
 
+      - name: Build yearly Parquet
+        working-directory: ingest_azure
+        run: python 03_build_parquet.py
+
+
