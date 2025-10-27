@@ -33,3 +33,8 @@ jobs:
       - name: Run ingest script
         working-directory: ingest_azure
         run: python 01_ingest_data.py
+
+      - name: Run unzip script
+        working-directory: ingest_azure
+        run: python 02_ingest_data.py
+
