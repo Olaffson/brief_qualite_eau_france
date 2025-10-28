@@ -1,23 +1,22 @@
+# pip install azure-storage-blob pandas pyarrow
 import os
 import io
 import re
-import posixpath
+import tempfile
 import pandas as pd
-from math import ceil
 from typing import List, Optional
-
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceNotFoundError
 
-# ========== Config ==========
+# ==== Config ====
 CONN_STR        = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
 CONTAINER       = "raw"
-UNZIP_ROOT      = "unzip"           # dossiers: unzip/dis-2021-dept/, ...
-OUT_ROOT        = "parquet_result"  # sortie:   parquet_result/dis-2021-dept/part-00000.parquet, ...
-SKIP_IF_SUCCESS = True              # saute l'année si _SUCCESS présent
-FORCE_SEP       = None              # ex: ";" pour forcer ; sinon auto-détection
-CHUNK_ROWS      = 100_000           # lignes par fichier de sortie
-# ============================
+UNZIP_ROOT      = "unzip"            # dossiers: unzip/dis-2021-dept/, ...
+OUT_ROOT        = "parquet_result"   # sortie:   parquet_result/dis_result_YYYY.parquet
+SKIP_IF_EXISTS  = True               # saute l'année si le .parquet existe déjà
+FORCE_SEP       = None               # ex ";" si tu connais le séparateur ; sinon auto
+FORCE_ENCODING  = None               # ex "utf-8" ou "latin-1" ; sinon auto
+# ===============
 
 YEAR_DIR_RE     = re.compile(r"^unzip/dis-(\d{4})-dept/?$")
 RESULT_FILE_RE  = re.compile(r".*/DIS_RESULT.*\.txt$", re.IGNORECASE)
@@ -30,6 +29,7 @@ def blob_exists(container_client, path: str) -> bool:
         return False
 
 def list_year_dirs(container_client) -> List[str]:
+    """Retourne les prefixes 'unzip/dis-YYYY-dept/' existants."""
     prefixes = set()
     for b in container_client.list_blobs(name_starts_with=f"{UNZIP_ROOT}/"):
         parts = b.name.split("/")
@@ -45,24 +45,23 @@ def detect_sep(sample: str) -> str:
     best = max(counts, key=counts.get)
     return best if counts[best] > 0 else ";"
 
+def decode_bytes(raw: bytes) -> str:
+    if FORCE_ENCODING:
+        return raw.decode(FORCE_ENCODING)
+    for enc in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    # dernier recours : ne pas échouer
+    return raw.decode("latin-1", errors="replace")
+
 def read_txt_to_df(container_client, blob_path: str) -> Optional[pd.DataFrame]:
     downloader = container_client.get_blob_client(blob_path).download_blob(max_concurrency=4)
     raw = downloader.readall()
-
-    # encodage : UTF-8 -> UTF-8-SIG -> Latin-1
-    for enc in ("utf-8", "utf-8-sig", "latin-1"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        print(f"   ⚠️ encodage inconnu pour {blob_path}, on saute.")
-        return None
-
+    text = decode_bytes(raw)
     head = "\n".join(text.splitlines()[:5])
     sep = detect_sep(head)
-
     try:
         df = pd.read_csv(io.StringIO(text), sep=sep, dtype=str)
         df.columns = [c.strip() for c in df.columns]
@@ -71,42 +70,16 @@ def read_txt_to_df(container_client, blob_path: str) -> Optional[pd.DataFrame]:
         print(f"   ❌ lecture KO {blob_path}: {e}")
         return None
 
-def write_parquet_parts(container_client, out_dir: str, df: pd.DataFrame):
-    import tempfile, pyarrow as pa, pyarrow.parquet as pq
-
-    total = len(df)
-    num_parts = max(1, ceil(total / CHUNK_ROWS))
-    print(f"   Écriture {num_parts} part(s) -> {out_dir}")
-
-    for i in range(num_parts):
-        part = df.iloc[i*CHUNK_ROWS:(i+1)*CHUNK_ROWS]
-        if part.empty:
-            continue
-        table = pa.Table.from_pandas(part, preserve_index=False)
-        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-            pq.write_table(table, tmp.name)
-            tmp_path = tmp.name
-
-        part_blob = f"{out_dir}part-{i:05d}.parquet"
-        with open(tmp_path, "rb") as f:
-            container_client.get_blob_client(part_blob).upload_blob(
-                f, overwrite=True,
-                content_settings=ContentSettings(content_type="application/octet-stream")
-            )
-        os.remove(tmp_path)
-        print(f"     ⬆️ {part_blob} ({len(part)} lignes)")
-
 def process_year(container_client, year_dir: str):
     m = YEAR_DIR_RE.match(year_dir.rstrip("/"))
     if not m:
         print(f"   ⚠️ pattern inattendu: {year_dir}")
         return
     year = m.group(1)
-    out_dir = f"{OUT_ROOT}/dis-{year}-dept/"
-    success_marker = f"{out_dir}_SUCCESS"
+    out_blob = f"{OUT_ROOT}/dis_result_{year}.parquet"
 
-    if SKIP_IF_SUCCESS and blob_exists(container_client, success_marker):
-        print(f"⏩ SKIP {year}: déjà assemblé ({success_marker})")
+    if SKIP_IF_EXISTS and blob_exists(container_client, out_blob):
+        print(f"⏩ SKIP {year}: {out_blob} existe déjà.")
         return
 
     # collecter les fichiers DIS_RESULT*.txt
@@ -120,7 +93,7 @@ def process_year(container_client, year_dir: str):
         print(f"   ⚠️ aucun DIS_RESULT*.txt sous {year_dir}")
         return
 
-    print(f"➡️  Année {year}: {len(txt_paths)} fichier(s) à assembler")
+    print(f"➡️  Année {year}: {len(txt_paths)} fichier(s) à assembler → {out_blob}")
 
     dfs = []
     for p in txt_paths:
@@ -137,22 +110,34 @@ def process_year(container_client, year_dir: str):
 
     full = pd.concat(dfs, ignore_index=True)
 
-    # écrire en Parquet multi-fichiers
-    write_parquet_parts(container_client, out_dir, full)
+    # écrire un UNIQUE fichier parquet temporaire puis uploader vers Azure
+    import pyarrow as pa, pyarrow.parquet as pq
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+        table = pa.Table.from_pandas(full, preserve_index=False)
+        pq.write_table(table, tmp.name)
+        tmp_path = tmp.name
 
-    # marker _SUCCESS
-    body = f"year={year}\nrows={len(full)}\n".encode("utf-8")
-    container_client.get_blob_client(success_marker).upload_blob(
-        body, overwrite=True, content_settings=ContentSettings(content_type="text/plain")
-    )
+    print(f"   ⬆️ upload vers: {out_blob} (rows={len(full)})")
+    with open(tmp_path, "rb") as f:
+        container_client.get_blob_client(out_blob).upload_blob(
+            f, overwrite=True,
+            content_settings=ContentSettings(content_type="application/octet-stream")
+        )
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
 
-    print(f"✅ Année {year} → {out_dir} (rows={len(full)})")
+    print(f"✅ Année {year} → {out_blob}")
 
 def main():
     svc = BlobServiceClient.from_connection_string(CONN_STR)
     container = svc.get_container_client(CONTAINER)
 
     year_dirs = list_year_dirs(container)
+    # Garde uniquement les années attendues (facultatif)
+    year_dirs = [d for d in year_dirs if re.search(r"dis-(2021|2022|2023|2024|2025)-dept/?$", d)]
+
     if not year_dirs:
         print("Aucun dossier 'unzip/dis-YYYY-dept/' trouvé.")
         return
