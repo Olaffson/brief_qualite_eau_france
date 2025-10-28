@@ -12,7 +12,7 @@ from azure.core.exceptions import ResourceNotFoundError
 CONN_STR    = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
 CONTAINER   = "raw"
 UNZIP_ROOT  = "unzip"     # dossiers: unzip/dis-2021-dept, unzip/dis-2022-dept, ...
-PARQUET_ROOT= "parquet"   # sortie:   parquet/dis-2021-dept.parquet, etc.
+PARQUET_ROOT= "parquet_plv"   # sortie:   parquet_plv/dis-2021-dept.parquet, etc.
 SKIP_IF_PARQUET_EXISTS = True
 
 YEAR_DIR_PATTERN = re.compile(r"^unzip/dis-(\d{4})-dept/?$")
@@ -81,7 +81,7 @@ def process_year(container_client, year_dir: str):
         print(f"   ⚠️ pattern inattendu: {year_dir}, on saute.")
         return
     year = m.group(1)
-    out_name = f"dis-{year}-dept.parquet"
+    out_name = f"dis-plv-{year}.parquet"
     out_blob = f"{PARQUET_ROOT}/{out_name}"
 
     if SKIP_IF_PARQUET_EXISTS and blob_exists(container_client, out_blob):

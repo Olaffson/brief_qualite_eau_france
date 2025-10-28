@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: "ingest_azure/requirements.txt"  # <<-- important
+          cache-dependency-path: "ingest_azure/requirements.txt" 
 
       - name: Install deps
         working-directory: ingest_azure
@@ -38,8 +38,10 @@ jobs:
         working-directory: ingest_azure
         run: python 02_ingest_data.py
 
-      - name: Build yearly Parquet
+      - name: Build yearly PLV Parquet
         working-directory: ingest_azure
         run: python 03_build_parquet.py
 
-
+      - name: Build yearly RESULT Parquet
+        working-directory: ingest_azure
+        run: python 04_build_parquet.py
