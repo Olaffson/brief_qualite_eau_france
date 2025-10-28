@@ -30,11 +30,11 @@ jobs:
         working-directory: ingest_azure
         run: pip install -r requirements.txt
 
-      - name: Run ingest script
+      - name: Ingest zip
         working-directory: ingest_azure
         run: python 01_ingest_zip.py
 
-      - name: Run unzip script
+      - name: Unzip
         working-directory: ingest_azure
         run: python 02_unzip.py
 
