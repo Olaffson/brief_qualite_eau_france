@@ -32,16 +32,16 @@ jobs:
 
       - name: Run ingest script
         working-directory: ingest_azure
-        run: python 01_ingest_data.py
+        run: python 01_ingest_zip.py
 
       - name: Run unzip script
         working-directory: ingest_azure
-        run: python 02_ingest_data.py
+        run: python 02_unzip.py
 
       - name: Build yearly PLV Parquet
         working-directory: ingest_azure
-        run: python 03_build_parquet.py
+        run: python 03_build_parquet_plv.py
 
       - name: Build yearly RESULT Parquet
         working-directory: ingest_azure
-        run: python 04_build_parquet.py
+        run: python 04_build_parquet_result.py
