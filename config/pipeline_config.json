@@ -1,0 +1,22 @@
+{
+  "name": "qualite-eau_pipeline",
+  "timeout_seconds": 7200,
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "raw_to_bronze",
+      "existing_cluster_id": "1027-125758-8xtnixci",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/okotwica.ext@simplonformations.onmicrosoft.com/brief_qualite_eau_france/notebooks/02_bronze_import"
+      }
+    },
+    {
+      "task_key": "bronze_to_silver",
+      "depends_on": [{"task_key": "raw_to_bronze"}],
+      "existing_cluster_id": "1027-125758-8xtnixci",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/okotwica.ext@simplonformations.onmicrosoft.com/brief_qualite_eau_france/notebooks/03_silver_transformation"
+      }
+    }
+  ]
+}

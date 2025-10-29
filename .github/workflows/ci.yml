@@ -45,3 +45,65 @@ jobs:
       - name: Build yearly RESULT Parquet
         working-directory: notebooks/01_ingest_qualite_eau
         run: python 04_build_parquet_result.py
+        
+  run-pipeline:
+    needs: run-ingest
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    steps:
+      - name: Create / Update Pipeline Job in Databricks
+        run: |
+          JOB_NAME="pipeline_qualite_eau_bronze_silver"
+
+          # Vérifie si le job existe déjà
+          JOB_ID=$(curl -s -X GET \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            "$DATABRICKS_HOST/api/2.1/jobs/list" | jq -r ".jobs[] | select(.settings.name==\"$JOB_NAME\") | .job_id")
+
+          if [ -z "$JOB_ID" ]; then
+            echo "🆕 Job n'existe pas → création..."
+
+            CREATE_RESPONSE=$(curl -s -X POST "$DATABRICKS_HOST/api/2.1/jobs/create" \
+              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "name": "'"$JOB_NAME"'",
+                "tasks": [
+                  {
+                    "task_key": "bronze_step",
+                    "existing_cluster_id": "1027-125758-8xtnixci",
+                    "notebook_task": { "notebook_path": "/Workspace/Users/okotwica.ext@simplonformations.onmicrosoft.com/brief_qualite_eau_france/notebooks/02_bronze_import" }
+                  },
+                  {
+                    "task_key": "silver_step",
+                    "depends_on": [{ "task_key": "bronze_step" }],
+                    "existing_cluster_id": "1027-125758-8xtnixci",
+                    "notebook_task": { "notebook_path": "/Workspace/Users/okotwica.ext@simplonformations.onmicrosoft.com/brief_qualite_eau_france/notebooks/03_silver_transformation" }
+                  }
+                ]
+              }')
+
+            JOB_ID=$(echo "$CREATE_RESPONSE" | jq -r '.job_id')
+            echo "✅ Job créé : ID = $JOB_ID"
+          else
+            echo "✔️ Job déjà existant : ID = $JOB_ID"
+          fi
+
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      - name: Run Databricks Pipeline Job
+        run: |
+          echo "🚀 Lancement du pipeline Databricks (Job ID: $JOB_ID)..."
+          RUN_ID=$(curl -s -X POST \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            "$DATABRICKS_HOST/api/2.1/jobs/run-now" \
+            -d "{\"job_id\": $JOB_ID}" | jq -r '.run_id')
+
+          echo "⏳ Pipeline en cours → RUN_ID=$RUN_ID"
+
+          # Optionnel : suivre l'exécution
+          sleep 20
+          echo "🌐 Consulter dans Databricks : $DATABRICKS_HOST/#job/$JOB_ID/run/$RUN_ID"
