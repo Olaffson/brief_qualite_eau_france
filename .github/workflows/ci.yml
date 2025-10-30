@@ -45,3 +45,78 @@ jobs:
       - name: Build yearly RESULT Parquet
         working-directory: notebooks/01_ingest_qualite_eau
         run: python 04_build_parquet_result.py
+
+  run-pipeline:
+    needs: run-ingest
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Validate pipeline config
+        run: |
+          test -f config/pipeline_config.json
+          jq . config/pipeline_config.json > /dev/null
+
+      - name: Create or Reset Databricks Job from config/pipeline_config.json
+        id: upsert_job
+        run: |
+          set -euo pipefail
+          CONFIG_PATH="config/pipeline_config.json"
+          JOB_NAME=$(jq -r '.name' "$CONFIG_PATH")
+
+          echo "🔎 Recherche du job Databricks nommé: $JOB_NAME"
+          LIST_JSON=$(curl -s -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            "$DATABRICKS_HOST/api/2.1/jobs/list")
+
+          JOB_ID=$(echo "$LIST_JSON" | jq -r --arg NAME "$JOB_NAME" \
+            '.jobs[]? | select(.settings.name == $NAME) | .job_id' | head -n1)
+
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "🆕 Job inexistant → création via /jobs/create"
+            CREATE_RESP=$(curl -s -X POST "$DATABRICKS_HOST/api/2.1/jobs/create" \
+              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$CONFIG_PATH")
+            echo "$CREATE_RESP"
+            JOB_ID=$(echo "$CREATE_RESP" | jq -r '.job_id')
+            if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+              echo "❌ Échec de création du job"; exit 1
+            fi
+          else
+            echo "✔️ Job existe (ID=$JOB_ID) → reset avec la nouvelle configuration"
+            # Construit le payload { "job_id": <id>, "new_settings": <contenu json> }
+            PAYLOAD=$(jq -nc --argjson job_id "$JOB_ID" --slurpfile settings "$CONFIG_PATH" \
+              '{job_id: $job_id, new_settings: $settings[0]}')
+            RESET_RESP=$(curl -s -X POST "$DATABRICKS_HOST/api/2.1/jobs/reset" \
+              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD")
+            echo "$RESET_RESP"
+          fi
+
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+          echo "✅ Job prêt (ID=$JOB_ID)"
+
+      - name: Run Databricks Job
+        run: |
+          set -euo pipefail
+          echo "🚀 Lancement du job ID=$JOB_ID"
+          RUN_RESP=$(curl -s -X POST "$DATABRICKS_HOST/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\": $JOB_ID}")
+          echo "$RUN_RESP"
+          RUN_ID=$(echo "$RUN_RESP" | jq -r '.run_id')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "❌ Échec run-now"; exit 1
+          fi
+          echo "🌐 Exécution: $DATABRICKS_HOST/#job/$JOB_ID/run/$RUN_ID"
