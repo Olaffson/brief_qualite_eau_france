@@ -1,0 +1,167 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch: {}
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            **/requirements.txt
+            pyproject.toml
+            **/pyproject.toml
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U pytest pytest-cov ruff black
+          # installe les deps du projet si présents
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f notebooks/01_ingest_qualite_eau/requirements.txt ]; then pip install -r notebooks/01_ingest_qualite_eau/requirements.txt; fi
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (black)
+        run: black --check .
+
+      - name: Run unit tests
+        env:
+          # variables de test (pas nécessaires pour les unit tests si tu mocks)
+          PYTHONWARNINGS: "ignore"
+        run: |
+          pytest -q --maxfail=1 --disable-warnings \
+                 --cov=. --cov-report=xml --cov-report=term-missing
+
+      - name: Generate HTML coverage report
+        run: |
+          coverage html
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
+          retention-days: 7
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(coverage report --fail-under=50 >/dev/null 2>&1; echo $?)
+          if [ $COVERAGE -ne 0 ]; then
+            echo "❌ Échec: couverture de test < 50%"
+            exit 1
+          else
+            echo "✅ Couverture de test >= 50%"
+          fi
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unit
+          fail_ci_if_error: true
+
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unit
+          fail_ci_if_error: true
+
+
+  integration-tests:
+    # Lance ces tests seulement si les secrets sont configurés
+    if: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING && secrets.DATABRICKS_HOST && secrets.DATABRICKS_TOKEN }}
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      # Optionnel: DATABRICKS_HTTP_PATH pour SQL Warehouse si tu en as un
+      DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps (integration)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U pytest requests azure-storage-blob databricks-sql
+
+      - name: Validate pipeline config JSON
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          test -f config/pipeline_config.json
+          jq . config/pipeline_config.json >/dev/null
+
+      - name: Smoke test Azure blob access (optional)
+        run: |
+          python - <<'PY'
+          import os
+          from azure.storage.blob import BlobServiceClient
+          conn = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+          svc = BlobServiceClient.from_connection_string(conn)
+          # check container raw exists
+          assert any(c.name=="raw" for c in svc.list_containers()), "container 'raw' manquant"
+          print("OK Azure: conteneur 'raw' présent")
+          PY
+
+      - name: Smoke test Databricks SQL (optional)
+        if: ${{ env.DATABRICKS_HTTP_PATH != '' }}
+        run: |
+          python - <<'PY'
+          import os
+          from databricks import sql
+          conn = sql.connect(
+              server_hostname=os.environ["DATABRICKS_HOST"].replace("https://",""),
+              http_path=os.environ["DATABRICKS_HTTP_PATH"],
+              access_token=os.environ["DATABRICKS_TOKEN"]
+          )
+          with conn.cursor() as c:
+              c.execute("SELECT 1")
+              print("OK Databricks SQL")
+          conn.close()
+          PY
+
+      - name: Run integration tests
+        env:
+          PYTHONWARNINGS: "ignore"
+        run: |
+          # Découvre et exécute seulement les tests marqués "integration"
+          pip install pytest
+          pytest -q -m "integration" --disable-warnings
